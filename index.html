@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Valve Flow CFD Visualization + Slice</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a1a1a; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        
+        /* UI Overlay */
+        #ui-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 320px;
+            background: rgba(0, 0, 0, 0.85);
+            padding: 20px;
+            border-radius: 8px;
+            color: white;
+            border: 1px solid #444;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            backdrop-filter: blur(5px);
+        }
+        
+        h2 { margin-top: 0; font-size: 18px; border-bottom: 1px solid #555; padding-bottom: 10px; color: #fff; }
+        
+        .control-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; font-size: 14px; color: #ccc; }
+        
+        input[type=range] { width: 100%; cursor: pointer; accent-color: #00ffcc; }
+        
+        /* Toggle Switch */
+        .toggle-container { display: flex; align-items: center; justify-content: space-between; cursor: pointer; }
+        .switch {
+            position: relative; display: inline-block; width: 40px; height: 20px;
+        }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider {
+            position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #555; transition: .4s; border-radius: 20px;
+        }
+        .slider:before {
+            position: absolute; content: ""; height: 14px; width: 14px; left: 3px; bottom: 3px;
+            background-color: white; transition: .4s; border-radius: 50%;
+        }
+        input:checked + .slider { background-color: #00ffcc; }
+        input:checked + .slider:before { transform: translateX(20px); }
+
+        .data-display {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            margin-top: 5px;
+        }
+        
+        .value { font-weight: bold; color: #00ffcc; }
+
+        /* Legend for CFD Colors */
+        .legend {
+            margin-top: 20px;
+            height: 20px;
+            background: linear-gradient(to right, blue, cyan, green, yellow, red);
+            border-radius: 4px;
+            position: relative;
+            border: 1px solid #555;
+        }
+        .legend-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 10px;
+            margin-top: 5px;
+            color: #aaa;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+
+    <div id="ui-panel">
+        <h2>CFD Flow Simulator</h2>
+        
+        <div class="control-group">
+            <label>Valve Opening Angle</label>
+            <input type="range" id="angleSlider" min="0" max="90" value="45" step="1">
+            <div class="data-display">
+                <span>Closed (0°)</span>
+                <span id="angleValue" class="value">45°</span>
+                <span>Open (90°)</span>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <label class="toggle-container">
+                <span>Horizontal Cross Section</span>
+                <label class="switch">
+                    <input type="checkbox" id="sectionToggle">
+                    <span class="slider"></span>
+                </label>
+            </label>
+            <div class="data-display" style="color: #888; font-size: 11px; margin-top:5px;">
+                <i>Visualizes center flow field (Y=0)</i>
+            </div>
+        </div>
+
+        <hr style="border-color: #444; opacity: 0.5;">
+
+        <div class="control-group">
+            <div class="data-display">
+                <span>Flow Velocity:</span>
+                <span id="velocityValue" class="value">50 m/s</span>
+            </div>
+            <div class="data-display">
+                <span>Pressure Drop:</span>
+                <span id="pressureValue" class="value">High</span>
+            </div>
+        </div>
+
+        <div class="legend"></div>
+        <div class="legend-labels">
+            <span>0 m/s</span>
+            <span>Max m/s</span>
+        </div>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <script>
+        // --- 1. SCENE SETUP ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x111111);
+        scene.fog = new THREE.FogExp2(0x111111, 0.02);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(2, 8, 12); // Elevated view to see cross section better
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.maxDistance = 30;
+
+        // Lights
+        const ambientLight = new THREE.AmbientLight(0x404040);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+        dirLight.position.set(5, 10, 7);
+        scene.add(dirLight);
+        const backLight = new THREE.DirectionalLight(0x445566, 0.5);
+        backLight.position.set(-5, -5, -5);
+        scene.add(backLight);
+
+        // --- 2. GEOMETRY: PIPE & VALVE ---
+
+        // A. The Pipe
+        const pipeGeometry = new THREE.CylinderGeometry(2, 2, 15, 32, 1, true);
+        const pipeMaterial = new THREE.MeshPhysicalMaterial({
+            color: 0xffffff,
+            metalness: 0.1,
+            roughness: 0.1,
+            transmission: 0.9,
+            transparent: true,
+            opacity: 0.2,
+            side: THREE.DoubleSide,
+            depthWrite: false 
+        });
+        const pipe = new THREE.Mesh(pipeGeometry, pipeMaterial);
+        pipe.rotation.z = Math.PI / 2;
+        scene.add(pipe);
+
+        const wireframe = new THREE.LineSegments(
+            new THREE.WireframeGeometry(pipeGeometry),
+            new THREE.LineBasicMaterial({ color: 0x333333, linewidth: 1, transparent: true, opacity: 0.3 })
+        );
+        wireframe.rotation.z = Math.PI / 2;
+        scene.add(wireframe);
+
+        // B. The Valve
+        const valveGroup = new THREE.Group();
+        
+        // Disc
+        const discGeo = new THREE.CylinderGeometry(1.9, 1.9, 0.2, 32);
+        const discMat = new THREE.MeshStandardMaterial({ color: 0x888888, metalness: 0.8, roughness: 0.4 });
+        const disc = new THREE.Mesh(discGeo, discMat);
+        disc.rotation.z = Math.PI / 2;
+        disc.rotation.x = Math.PI / 2; 
+        valveGroup.add(disc);
+
+        // Shaft
+        const shaftGeo = new THREE.CylinderGeometry(0.2, 0.2, 4.2, 16);
+        const shaftMat = new THREE.MeshStandardMaterial({ color: 0xffaa00 });
+        const shaft = new THREE.Mesh(shaftGeo, shaftMat);
+        valveGroup.add(shaft);
+
+        scene.add(valveGroup);
+
+        // C. Cross Section Helper Plane (Hidden by default)
+        const planeGeo = new THREE.PlaneGeometry(15, 4);
+        const planeMat = new THREE.MeshBasicMaterial({ 
+            color: 0x00ffcc, 
+            transparent: true, 
+            opacity: 0.05, 
+            side: THREE.DoubleSide,
+        });
+        const sectionPlane = new THREE.Mesh(planeGeo, planeMat);
+        sectionPlane.rotation.x = Math.PI / 2; // Horizontal plane
+        sectionPlane.visible = false; // Hidden initially
+        
+        // Add grid helper to plane
+        const gridHelper = new THREE.GridHelper(15, 15, 0x00ffcc, 0x004433);
+        gridHelper.position.y = -0.01; // slight offset
+        gridHelper.scale.z = 0.26; // Compress to fit pipe width roughly
+        sectionPlane.add(gridHelper);
+        
+        scene.add(sectionPlane);
+
+        // --- 3. FLOW SIMULATION (SEPARATED STATE) ---
+        
+        const particleCount = 4000;
+        const particlesGeo = new THREE.BufferGeometry();
+        
+        // Render Arrays (What GPU uses)
+        const renderPosArray = new Float32Array(particleCount * 3);
+        const renderColorArray = new Float32Array(particleCount * 3);
+        
+        // Physics State Arrays (What CPU uses for calculation)
+        // We use a separate array so we can hide particles (set renderPos to Infinity)
+        // without losing their actual location in the simulation.
+        const statePosArray = new Float32Array(particleCount * 3); // x, y, z
+        const stateSpeedArray = new Float32Array(particleCount); // individual speed modifiers
+
+        // Initialize
+        for(let i = 0; i < particleCount; i++) {
+            const i3 = i * 3;
+            // Random position
+            statePosArray[i3] = (Math.random() - 0.5) * 14; // X
+            
+            const r = Math.random() * 1.8;
+            const theta = Math.random() * Math.PI * 2;
+            statePosArray[i3+1] = r * Math.cos(theta); // Y
+            statePosArray[i3+2] = r * Math.sin(theta); // Z
+
+            // Random base speed
+            stateSpeedArray[i] = Math.random() * 0.1 + 0.05;
+
+            // Set initial color
+            renderColorArray[i3] = 0; renderColorArray[i3+1] = 0.5; renderColorArray[i3+2] = 1;
+        }
+
+        particlesGeo.setAttribute('position', new THREE.BufferAttribute(renderPosArray, 3));
+        particlesGeo.setAttribute('color', new THREE.BufferAttribute(renderColorArray, 3));
+
+        const particleMaterial = new THREE.PointsMaterial({
+            size: 0.12,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.8,
+            blending: THREE.AdditiveBlending
+        });
+
+        const particleSystem = new THREE.Points(particlesGeo, particleMaterial);
+        scene.add(particleSystem);
+
+
+        // --- 4. LOGIC & INTERACTION ---
+
+        const slider = document.getElementById('angleSlider');
+        const sectionToggle = document.getElementById('sectionToggle');
+        const valDisplay = document.getElementById('angleValue');
+        const velDisplay = document.getElementById('velocityValue');
+        const pressDisplay = document.getElementById('pressureValue');
+
+        let valveAngle = 45; 
+        let flowFactor = 0.5; 
+        let isCrossSection = false;
+
+        function updateSettings() {
+            // Angle Logic
+            valveAngle = parseInt(slider.value);
+            valDisplay.innerText = valveAngle + "°";
+            valveGroup.rotation.y = THREE.MathUtils.degToRad(valveAngle);
+            
+            // Physics Factors
+            flowFactor = Math.sin(THREE.MathUtils.degToRad(valveAngle));
+            if(flowFactor < 0.01) flowFactor = 0.01; // Prevent divide by zero issues
+
+            // UI Updates
+            velDisplay.innerText = (flowFactor * 100).toFixed(1) + " m/s";
+            if(flowFactor < 0.1) pressDisplay.innerText = "Critical Blockage";
+            else if(flowFactor < 0.5) pressDisplay.innerText = "High Drop";
+            else pressDisplay.innerText = "Normal";
+
+            // Slice Logic
+            isCrossSection = sectionToggle.checked;
+            sectionPlane.visible = isCrossSection;
+            
+            // Adjust materials based on mode
+            if(isCrossSection) {
+                pipeMaterial.opacity = 0.05; // Make pipe almost invisible to focus on slice
+                wireframe.material.opacity = 0.1;
+                particleMaterial.size = 0.18; // Make slice particles slightly chunky
+            } else {
+                pipeMaterial.opacity = 0.2;
+                wireframe.material.opacity = 0.3;
+                particleMaterial.size = 0.12;
+            }
+        }
+
+        function getHeatMapColor(t) {
+            const color = new THREE.Color();
+            // Blue (slow) -> Cyan -> Green -> Yellow -> Red (fast)
+            color.setHSL((1.0 - t) * 0.66, 1.0, 0.5);
+            return color;
+        }
+
+        function animateFlow() {
+            const positions = particleSystem.geometry.attributes.position.array;
+            const colors = particleSystem.geometry.attributes.color.array;
+
+            // Obstruction Calculation
+            const rad = THREE.MathUtils.degToRad(valveAngle);
+            const obstructionWidth = 2.0 * Math.cos(rad);
+
+            for(let i = 0; i < particleCount; i++) {
+                const i3 = i * 3;
+                
+                // 1. UPDATE PHYSICS (CPU Side)
+                let x = statePosArray[i3];
+                let y = statePosArray[i3+1];
+                let z = statePosArray[i3+2];
+
+                let currentSpeed = 0.2 * flowFactor;
+
+                // Valve Collision/Flow Logic
+                if (Math.abs(x) < 1.0) {
+                    // If particle is within the valve's Z-shadow
+                    if (Math.abs(z) < obstructionWidth && Math.abs(x) < 0.5) {
+                        currentSpeed *= 0.05; // Blocked
+                        // Turbulence
+                        statePosArray[i3+1] += (Math.random() - 0.5) * 0.02;
+                        statePosArray[i3+2] += (Math.random() - 0.5) * 0.02;
+                    }
+                }
+
+                x += currentSpeed;
+
+                // Reset if out of bounds
+                if(x > 7) {
+                    x = -7;
+                    const r = Math.random() * 1.8;
+                    const theta = Math.random() * Math.PI * 2;
+                    statePosArray[i3+1] = r * Math.cos(theta);
+                    statePosArray[i3+2] = r * Math.sin(theta);
+                }
+                statePosArray[i3] = x;
+
+                // 2. UPDATE RENDER (GPU Side)
+                
+                // CROSS SECTION LOGIC:
+                // If mode is ON, we check if the particle is near Y=0. 
+                // If it is, we draw it. If not, we throw it to infinity.
+                
+                let isVisible = true;
+                if(isCrossSection) {
+                    // Only show particles within 0.1 units of the center plane
+                    if(Math.abs(statePosArray[i3+1]) > 0.15) {
+                        isVisible = false;
+                    }
+                }
+
+                if(isVisible) {
+                    positions[i3] = statePosArray[i3];
+                    positions[i3+1] = statePosArray[i3+1];
+                    positions[i3+2] = statePosArray[i3+2];
+
+                    // Color update
+                    let normalizedSpeed = currentSpeed / 0.25; 
+                    if(normalizedSpeed > 1) normalizedSpeed = 1;
+                    const col = getHeatMapColor(normalizedSpeed);
+                    colors[i3] = col.r;
+                    colors[i3+1] = col.g;
+                    colors[i3+2] = col.b;
+                } else {
+                    // Hide particle by moving it far away
+                    positions[i3] = 0;
+                    positions[i3+1] = 10000; 
+                    positions[i3+2] = 0;
+                }
+            }
+
+            particleSystem.geometry.attributes.position.needsUpdate = true;
+            particleSystem.geometry.attributes.color.needsUpdate = true;
+        }
+
+        // Animation Loop
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            animateFlow();
+            renderer.render(scene, camera);
+        }
+
+        // Events
+        slider.addEventListener('input', updateSettings);
+        sectionToggle.addEventListener('change', updateSettings);
+        
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Start
+        updateSettings();
+        animate();
+
+    </script>
+</body>
+</html>
